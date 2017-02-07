@@ -18150,6 +18150,129 @@ TEST_F(VkPositiveLayerTest, SecondaryCommandBufferClearColorAttachments) {
     vkCmdClearAttachments(secondary_command_buffer, 1, &color_attachment, 1, &clear_rect);
 }
 
+TEST_F(VkPositiveLayerTest, ImageLayoutTransitionsOnTransferOfOwnership) {
+    TEST_DESCRIPTION(
+        "Perform an image layout transition in a secondary command buffer followed "
+        "by a transition in the primary.");
+    VkResult err;
+    m_errorMonitor->ExpectSuccess();
+    ASSERT_NO_FATAL_FAILURE(InitState());
+    ASSERT_NO_FATAL_FAILURE(InitRenderTarget());
+
+    // Create a second queue using a different queue family
+    VkQueue other_queue;
+    vkGetDeviceQueue(m_device->device(), 1, 0, &other_queue);
+
+    VkCommandBufferAllocateInfo command_buffer_allocate_info = {};
+    command_buffer_allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    command_buffer_allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    command_buffer_allocate_info.commandBufferCount = 1;
+
+    // Create a second command pool on a different queue family
+    VkCommandPool oqcp;
+    VkCommandPoolCreateInfo other_queue_command_pool;
+    other_queue_command_pool.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    other_queue_command_pool.pNext = NULL;
+    other_queue_command_pool.queueFamilyIndex = 1;
+    other_queue_command_pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    vkCreateCommandPool(m_device->device(), &other_queue_command_pool, NULL, &oqcp);
+
+    // Allocate a commandbuffer from this command pool/queue family
+    command_buffer_allocate_info.commandPool = oqcp;
+    VkCommandBuffer other_queue_command_buffer;
+    ASSERT_VK_SUCCESS(vkAllocateCommandBuffers(m_device->device(), &command_buffer_allocate_info, &other_queue_command_buffer));
+
+    // Allocate a cmd buffer from the primary CB/queue family
+    command_buffer_allocate_info.commandPool = m_commandPool;
+    VkCommandBuffer primary_command_buffer;
+    ASSERT_VK_SUCCESS(vkAllocateCommandBuffers(m_device->device(), &command_buffer_allocate_info, &primary_command_buffer));
+
+    VkCommandBufferBeginInfo command_buffer_begin_info = {};
+    command_buffer_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    command_buffer_begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    // Now update primary cmd buffer to execute secondary and transition image
+    err = vkBeginCommandBuffer(primary_command_buffer, &command_buffer_begin_info);
+    ASSERT_VK_SUCCESS(err);
+    VkImageObj image(m_device);
+    image.init(128, 128, VK_FORMAT_R8G8B8A8_UINT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_TILING_OPTIMAL, 0);
+    ASSERT_TRUE(image.initialized());
+    VkImageMemoryBarrier img_barrier2 = {};
+    img_barrier2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    img_barrier2.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+    img_barrier2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    img_barrier2.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    img_barrier2.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    img_barrier2.image = image.handle();
+    img_barrier2.srcQueueFamilyIndex = 0;
+    img_barrier2.dstQueueFamilyIndex = 0;
+    img_barrier2.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    img_barrier2.subresourceRange.baseArrayLayer = 0;
+    img_barrier2.subresourceRange.baseMipLevel = 0;
+    img_barrier2.subresourceRange.layerCount = 1;
+    img_barrier2.subresourceRange.levelCount = 1;
+    vkCmdPipelineBarrier(primary_command_buffer, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+        nullptr, 1, &img_barrier2);
+
+    img_barrier2.dstQueueFamilyIndex = 1;
+    img_barrier2.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    img_barrier2.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+    vkCmdPipelineBarrier(primary_command_buffer, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+        nullptr, 1, &img_barrier2);
+
+    err = vkEndCommandBuffer(primary_command_buffer);
+    ASSERT_VK_SUCCESS(err);
+
+    err = vkBeginCommandBuffer(other_queue_command_buffer, &command_buffer_begin_info);
+    ASSERT_VK_SUCCESS(err);
+
+    VkImageMemoryBarrier img_barrier = {};
+    img_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    img_barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+    img_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    img_barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    img_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    img_barrier.image = image.handle();
+    img_barrier.srcQueueFamilyIndex = 0;
+    img_barrier.dstQueueFamilyIndex = 1;
+    img_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    img_barrier.subresourceRange.baseArrayLayer = 0;
+    img_barrier.subresourceRange.baseMipLevel = 0;
+    img_barrier.subresourceRange.layerCount = 1;
+    img_barrier.subresourceRange.levelCount = 1;
+    vkCmdPipelineBarrier(other_queue_command_buffer, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr,
+        0, nullptr, 1, &img_barrier);
+    err = vkEndCommandBuffer(other_queue_command_buffer);
+    ASSERT_VK_SUCCESS(err);
+
+    VkCommandBuffer cb_list[2] = {};
+    cb_list[0] = primary_command_buffer;
+    cb_list[1] = other_queue_command_buffer;
+
+
+    VkSubmitInfo submit_info = {};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1;
+
+    // Submit primary CB on first queue (graphics queue)
+    submit_info.pCommandBuffers = &primary_command_buffer;
+    err = vkQueueSubmit(m_device->m_queue, 1, &submit_info, VK_NULL_HANDLE);
+
+    // Submit other CB on second queue (transfer queue)
+    submit_info.pCommandBuffers = &other_queue_command_buffer;
+    err = vkQueueSubmit(other_queue, 1, &submit_info, VK_NULL_HANDLE);
+
+    // ASSERT_VK_SUCCESS(err);
+    m_errorMonitor->VerifyNotFound();
+    err = vkDeviceWaitIdle(m_device->device());
+
+    ASSERT_VK_SUCCESS(err);
+    vkFreeCommandBuffers(m_device->device(), oqcp, 1, &other_queue_command_buffer);
+    vkFreeCommandBuffers(m_device->device(), m_commandPool, 1, &primary_command_buffer);
+    vkDestroyCommandPool(m_device->device(), oqcp, NULL);
+}
+
 TEST_F(VkPositiveLayerTest, SecondaryCommandBufferImageLayoutTransitions) {
     TEST_DESCRIPTION(
         "Perform an image layout transition in a secondary command buffer followed "
