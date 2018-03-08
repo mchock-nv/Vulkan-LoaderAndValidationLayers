@@ -19669,6 +19669,163 @@ TEST_F(VkLayerTest, CopyImageCompressedBlockAlignment) {
     m_commandBuffer->end();
 }
 
+TEST_F(VkLayerTest, CopyImageSinglePlane422Alignment) {
+    // Image copy tests on single-plane _422 formats with block alignment errors
+
+    // Enable KHR multiplane req'd extensions
+    bool mp_extensions = InstanceExtensionSupported(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
+        VK_KHR_GET_MEMORY_REQUIREMENTS_2_SPEC_VERSION);
+    if (mp_extensions) {
+        m_instance_extension_names.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+    }
+    ASSERT_NO_FATAL_FAILURE(InitFramework(myDbgFunc, m_errorMonitor));
+    mp_extensions = mp_extensions && DeviceExtensionSupported(gpu(), nullptr, VK_KHR_MAINTENANCE1_EXTENSION_NAME);
+    mp_extensions = mp_extensions && DeviceExtensionSupported(gpu(), nullptr, VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
+    mp_extensions = mp_extensions && DeviceExtensionSupported(gpu(), nullptr, VK_KHR_BIND_MEMORY_2_EXTENSION_NAME);
+    mp_extensions = mp_extensions && DeviceExtensionSupported(gpu(), nullptr, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
+    if (mp_extensions) {
+        m_device_extension_names.push_back(VK_KHR_MAINTENANCE1_EXTENSION_NAME);
+        m_device_extension_names.push_back(VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME);
+        m_device_extension_names.push_back(VK_KHR_BIND_MEMORY_2_EXTENSION_NAME);
+        m_device_extension_names.push_back(VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME);
+    }
+    else {
+        printf("             test requires KHR multiplane extensions, not available.  Skipping.\n");
+        return;
+    }
+    ASSERT_NO_FATAL_FAILURE(InitState());
+
+    // Select a _422 format and verify support
+    PFN_vkGetPhysicalDeviceImageFormatProperties2KHR GetPDIFP2KHR =
+        (PFN_vkGetPhysicalDeviceImageFormatProperties2KHR)vkGetInstanceProcAddr(instance(),
+            "vkGetPhysicalDeviceImageFormatProperties2KHR");
+    VkPhysicalDeviceImageFormatInfo2KHR fmt_info = {};
+    fmt_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2_KHR;
+    fmt_info.pNext = nullptr;
+    fmt_info.format = VK_FORMAT_B8G8R8G8_422_UNORM_KHR;
+    fmt_info.type = VK_IMAGE_TYPE_2D;
+    fmt_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    fmt_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    fmt_info.flags = 0;
+
+    VkImageFormatProperties2KHR fmt_props = {};
+    fmt_props.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2_KHR;
+    VkResult err = GetPDIFP2KHR(gpu(), &fmt_info, &fmt_props);
+    if (VK_SUCCESS != err) {
+        printf("             Single-plane _422 image format not supported.  Skipping test.\n");
+        return;
+    }
+
+    fmt_info.format = VK_FORMAT_BC5_UNORM_BLOCK;
+    err = GetPDIFP2KHR(gpu(), &fmt_info, &fmt_props);
+    if (VK_SUCCESS != err) {
+        printf("             Compressed 4x4 image format not supported.  Skipping test.\n");
+        return;
+    }
+
+    VkImageCreateInfo ci = {};
+    ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ci.pNext = NULL;
+    ci.flags = fmt_info.flags;
+    ci.imageType = fmt_info.type;
+    ci.format = VK_FORMAT_B8G8R8G8_422_UNORM_KHR;
+    ci.tiling = fmt_info.tiling;
+    ci.usage = fmt_info.usage;
+    ci.extent = { 64, 64, 1 };
+    ci.mipLevels = 1;
+    ci.arrayLayers = 1;
+    ci.samples = VK_SAMPLE_COUNT_1_BIT;
+    ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ci.queueFamilyIndexCount = 0;
+    ci.pQueueFamilyIndices = NULL;
+    ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    // Create images
+    VkImageObj image_422(m_device);
+    image_422.init(&ci);
+    ASSERT_TRUE(image_422.initialized());
+
+    //ci.extent = { 64, 64, 1 };
+    ci.format = VK_FORMAT_BC5_UNORM_BLOCK;
+    VkImageObj image_BC5_4x4(m_device);
+    image_BC5_4x4.init(&ci);
+    ASSERT_TRUE(image_BC5_4x4.initialized());
+
+    ci.format = GetFormat(instance(), m_device);
+    VkImageObj image(m_device);
+    image.init(&ci);
+    ASSERT_TRUE(image.initialized());
+
+    m_commandBuffer->begin();
+
+    VkImageCopy copy_region;
+    copy_region.extent = { 48, 48, 1 };
+    copy_region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copy_region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copy_region.srcSubresource.mipLevel = 0;
+    copy_region.dstSubresource.mipLevel = 0;
+    copy_region.srcSubresource.baseArrayLayer = 0;
+    copy_region.dstSubresource.baseArrayLayer = 0;
+    copy_region.srcSubresource.layerCount = 1;
+    copy_region.dstSubresource.layerCount = 1;
+    copy_region.srcOffset = { 0, 0, 0 };
+    copy_region.dstOffset = { 0, 0, 0 };
+
+    // Src offsets must be multiples of compressed block sizes
+    copy_region.srcOffset = { 3, 4, 0 };  // source offset x
+    m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, VALIDATION_ERROR_09c00d7e);
+    m_commandBuffer->CopyImage(image_422.image(), VK_IMAGE_LAYOUT_GENERAL, image.image(), VK_IMAGE_LAYOUT_GENERAL, 1, &copy_region);
+    m_errorMonitor->VerifyFound();
+    copy_region.srcOffset = { 12, 1, 0 };  // source offset y
+    m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, VALIDATION_ERROR_09c00d7e);
+    m_commandBuffer->CopyImage(image_BC5_4x4.image(), VK_IMAGE_LAYOUT_GENERAL, image.image(), VK_IMAGE_LAYOUT_GENERAL, 1, &copy_region);
+    m_errorMonitor->VerifyFound();
+    
+    // Dst offsets must be multiples of compressed block sizes
+    copy_region.srcOffset = { 0, 0, 0 };
+    copy_region.dstOffset = { 1, 0, 0 };
+    m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, VALIDATION_ERROR_09c00d86);
+    m_commandBuffer->CopyImage(image.image(), VK_IMAGE_LAYOUT_GENERAL, image_422.image(), VK_IMAGE_LAYOUT_GENERAL, 1, &copy_region);
+    m_errorMonitor->VerifyFound();
+    copy_region.dstOffset = { 4, 1, 0 };  // dest offset x
+    m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, VALIDATION_ERROR_09c00d86);
+    m_commandBuffer->CopyImage(image.image(), VK_IMAGE_LAYOUT_GENERAL, image_BC5_4x4.image(), VK_IMAGE_LAYOUT_GENERAL, 1, &copy_region);
+    m_errorMonitor->VerifyFound();
+    copy_region.dstOffset = { 0, 0, 0 };
+
+    // Copy extent must be multiples of compressed block sizes if not full width/height
+    copy_region.extent = { 31, 60, 1 };  // 422 source, extent.x
+    m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, VALIDATION_ERROR_09c00d80);
+    m_commandBuffer->CopyImage(image_422.image(), VK_IMAGE_LAYOUT_GENERAL, image.image(), VK_IMAGE_LAYOUT_GENERAL, 1, &copy_region);
+    m_errorMonitor->VerifyFound();
+    copy_region.extent = { 32, 62, 1 };  // 422 source, extent.y
+    m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, VALIDATION_ERROR_09c00d82);
+    m_commandBuffer->CopyImage(image_422.image(), VK_IMAGE_LAYOUT_GENERAL, image.image(), VK_IMAGE_LAYOUT_GENERAL, 1, &copy_region);
+    m_errorMonitor->VerifyFound();
+
+    //copy_region.extent = { 60, 62, 1 };  // source height
+    //m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, VALIDATION_ERROR_09c0013e);
+    //m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, "queue family image transfer granularity");
+    //m_commandBuffer->CopyImage(image_1.image(), VK_IMAGE_LAYOUT_GENERAL, image_BC5_4x4.image(), VK_IMAGE_LAYOUT_GENERAL, 1, &copy_region);
+    //m_errorMonitor->VerifyFound();
+    //copy_region.extent = { 62, 60, 1 };  // dest width
+    //m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, VALIDATION_ERROR_09c00146);
+    //m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, "queue family image transfer granularity");
+    //m_commandBuffer->CopyImage(image_BC5_4x4.image(), VK_IMAGE_LAYOUT_GENERAL, image_1.image(), VK_IMAGE_LAYOUT_GENERAL, 1, &copy_region);
+    //m_errorMonitor->VerifyFound();
+    //copy_region.extent = { 60, 62, 1 };  // dest height
+    //m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, VALIDATION_ERROR_09c00148);
+    //m_errorMonitor->SetDesiredFailureMsg(VK_DEBUG_REPORT_ERROR_BIT_EXT, "queue family image transfer granularity");
+    //m_commandBuffer->CopyImage(image_BC5_4x4.image(), VK_IMAGE_LAYOUT_GENERAL, image_1.image(), VK_IMAGE_LAYOUT_GENERAL, 1, &copy_region);
+    //m_errorMonitor->VerifyFound();
+
+    // Note: VALIDATION_ERROR_09c00140 and VALIDATION_ERROR_09c0014a
+    //       VUs 01212 and 01217 should be tested here, if possible.  There are currently no supported compressed formats with
+    //       a block depth other than 1, so impossible to create a 'not a multiple' condiditon for depth.
+
+    m_commandBuffer->end();
+}
+
 TEST_F(VkLayerTest, CopyImageSrcSizeExceeded) {
     // Image copy with source region specified greater than src image size
     ASSERT_NO_FATAL_FAILURE(Init());
